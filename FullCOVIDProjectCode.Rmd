@@ -1,0 +1,1776 @@
+---
+title: "SARS-CoV-2 infection unevenly impacts metabolism in the coronal periphery of the lungs"
+author: "JarrodRoach"
+date: "2024-04-19"
+output: html_document
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Libraries needed to run the code
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(VennDiagram)
+library(UpSetR)
+library(ggvenn)
+library(ggpubr)
+library(rstatix)
+```
+
+Custom function used later in the analysis
+
+```{r}
+#function to check how many zeroes a metabolite has
+check_zeros <- function(lst) {
+  zero_count <- sum(lst == 0)
+  prop_zero <- zero_count / length(lst)
+  
+  if(prop_zero < 0.80 & prop_zero > 0.50) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+}
+```
+
+Datasets
+
+```{r}
+#Full data
+AllSamples <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/6b_NoOutliers_ViralLoad_ONLY_COHORT2_OnlySamples.csv")
+
+#Annotations from GNPS
+annotations <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/COVIDCohort2FMNInteriorExterior/FBMN2/ShortenedNodesNoSuspect.csv")
+
+#Molecular families as assigned by NPClassifier
+molecularFamilies <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MolecularFamiliesCSV.csv", fileEncoding = 'UTF-8-BOM')
+
+#More specific families annotations that were manually cleaned up by me
+alteredFamilies <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/OverallMetabolites/alteredFamiliesSignificantInfected1000andMockAllMetabolites.csv")
+
+#Subsets of data
+D51000 <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Infected_D5_OneThousand"))
+D55000 <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Infected_D5_FiveThousand"))
+Mock5 <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Mock5_MOCK"))
+D20 <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Infected_20D_OneThousand"))
+Mock20 <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Mock20_MOCK"))
+
+```
+
+
+_________________________________________________________
+____                  D5-1000 Start               _______
+_________________________________________________________
+
+Code to generate p-values and fold change values. This same code was used for D5-5000 and D20-1000 as well.
+_________________________________________________________
+____                D5-1000 Overall               _______
+_________________________________________________________
+
+
+```{r}
+metabolite_list <- data.frame()
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 27:4635) {
+  pval <- wilcox.test(D51000[,i], Mock5[,i], paired = FALSE)$p.value
+  if (is.nan(pval)){
+    next #necessary to avoid tripping error
+  }
+  #this statement prevents interpretting data that is too sparse
+  if (median(D51000[,i]) == 0 & median(Mock5[,i]) == 0) {
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000)[i], pval, FC))
+  }
+  #only allows consideration of a median value of 0 for D5-1000 (AKA FC = 0) if more than 80% of entries are 0 
+  else if (check_zeros(D51000[,i])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000)[i], pval, FC))
+  }
+  #only allows consideration of a median value of 0 for Mock5 (AKA FC = INF) if more than 80% of entries are 0 
+  else if (check_zeros(Mock5[,i])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000)[i], pval, FC))
+  }
+  else{
+    FC <- median(D51000[,i])/median(Mock5[,i])
+    metabolite_list <- rbind(metabolite_list, list(names(D51000)[i], pval, FC))
+  }
+  }
+})
+
+#assign column names
+colnames(metabolite_list) <- c("Metabolites", "pval", "foldChange")
+
+#get rid of NAs for foldChange because they are valueless
+metabolite_list <- metabolite_list[!is.na(metabolite_list$foldChange),]
+
+# Order data frame by p_val
+metabolite_list <- metabolite_list[order(metabolite_list$pval), ]
+
+#Now, split the name of the metabolites into its characteristers
+for (i in seq_along(metabolite_list$Metabolites)){
+  x <- unlist(strsplit(metabolite_list$Metabolites[i],split ="_"))
+  metabolite_list[i,4] <- x[1]
+  metabolite_list[i,5] <- x[2]
+  metabolite_list[i,6] <- x[3]
+}
+
+colnames(metabolite_list) <- c("full", "pvalue", "foldChange", "mz", "RT", "ID")
+metabolite_list$ID <- as.integer(metabolite_list$ID)
+
+#annotate
+SignificantAnnotations <- left_join(metabolite_list, annotations, by = "ID" )
+SignificantAnnotationsAndFamilies <- left_join(SignificantAnnotations, molecularFamilies, by = "FamilyCluster" )
+
+#subset to only metabolites with some form of annotations
+annotatedOnly1000 <- subset(SignificantAnnotationsAndFamilies, Analog.Compound_Name != "")
+
+# Order data frame by pvalue in descending order
+annotatedOnly1000 <- annotatedOnly1000[order(annotatedOnly1000$pvalue), ]
+
+#adjust p-value
+annotatedOnly1000$pAdjusted <- p.adjust(annotatedOnly1000$pvalue, method = "fdr")
+
+#Add in specific families from manual annotations
+specificFamilyAllpval05Infected1000 <- merge(annotatedOnly1000[,c(1,3:23)], alteredFamilies[,c(1,24)],  by = "full", all.x = TRUE)
+
+# Replace NA values in "SpecificFamily" with corresponding values from "Family" column in A
+specificFamilyAllpval05Infected1000$SpecificFamily[is.na(specificFamilyAllpval05Infected1000$SpecificFamily)] <- specificFamilyAllpval05Infected1000$Family[is.na(specificFamilyAllpval05Infected1000$SpecificFamily)]
+
+#write the file to csv
+#write.csv(specificFamilyAllpval05Infected1000, file = "significantInfected1000andMockAllMetabolites.csv")
+```
+
+Make the family figures (Figures 2 and 4)
+
+
+
+```{r}
+overallAlteredFamilies1000 <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/significantInfected1000andMockAllMetabolites.csv")
+
+#only keep significant metabolites
+overallAlteredFamilies1000 <- overallAlteredFamilies1000[overallAlteredFamilies1000$pAdjusted < 0.05,]
+
+# Filter out families that are not of value 
+# Subset data down to families with more than 4 metabolites
+truncatedFamilies <- overallAlteredFamilies1000 %>%
+  filter(!SpecificFamily %in% c(NA, "Unannotated", "Trash", "Ketamine family", "Exposome", "Glycols", "Phosphorylcholine", "PEG", "Salts")) %>%
+  # Group by family and filter out families with less than 5 members
+  group_by(SpecificFamily) %>%
+  filter(n() >= 4) %>%
+  ungroup()
+
+# Sort the dataframe by median foldChange value
+truncatedFamilies <- truncatedFamilies %>%
+  mutate(SpecificFamily = factor(SpecificFamily, levels = unique(SpecificFamily))) %>%
+  arrange(median(foldChange, na.rm = TRUE))
+
+# Create boxplot
+ggplot(truncatedFamilies, aes(x = reorder(SpecificFamily, foldChange, FUN = median), y = foldChange, fill = SpecificFamily)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(position = position_jitter(width = 0.2), alpha = 0.2) +
+  labs(x = "Family", y = "Fold Change", title = "Significantly altered metabolite families in D5-1000 mice") +
+  geom_hline(yintercept = 1.5, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 0.67, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 1, linetype="solid", color = "black") +
+  coord_flip() +
+  ylim(0, 10) +
+  scale_fill_manual(values = c("Amino Acids" = "#ff1493", 
+                               "Fatty Acids" = "#ffa500",
+                               "Eicosanoids" = "#E0B0FF",
+                               "Acylcarnitines" = "#00ff00",
+                               "Purines" = "yellow",
+                               "other" = "gray"), guide = "none") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 18, hjust = 0.5)) 
+
+
+ggsave("OverallD51000.png", plot = last_plot(), device = "png", width = 9, height = 6, dpi = 300)
+```
+
+_________________________________________________________
+____          D5-1000 Periphery/Central           _______
+_________________________________________________________
+
+
+```{r}
+metabolite_list <- data.frame()
+
+#checking that it works
+which(colnames(Mock5External) == "X351.22_2.63_4097")
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 2012:2012) {
+  if (median(Mock5External[,i]) == 0 | median(Mock5Internal[,i]) == 0) {
+    if (median(D51000External[,i]) == 0 & median(D51000Internal[,i]) == 0) {
+      pval <- NaN
+      FC <- NaN
+      metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+      next
+    }
+    pval <- wilcox.test(D51000External[,i], D51000Internal[,i], paired = FALSE)$p.value
+    if (is.nan(pval)){
+      next #necessary to avoid tripping error
+    }
+    else if (check_zeros(D51000External[,i])){
+      FC <- NaN
+      metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+      next
+    }
+    else if (check_zeros(D51000Internal[,i])){
+      FC <- NaN
+      metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+      next
+    }
+    else{
+      FC <- median(D51000External[,i])/median(D51000Internal[,i])
+      metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+      next
+    }
+  }
+  pval <- wilcox.test(D51000External[,i]/median(Mock5External[,i]), D51000Internal[,i]/median(Mock5Internal[,i]), paired = FALSE)$p.value
+  if (is.nan(pval)){
+    next #necessary to avoid tripping error
+  }
+  if (median(D51000External[,i]) == 0 & median(D51000Internal[,i]) == 0) {
+    pval <- NaN
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+  }
+  else if (check_zeros(D51000External[,])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+  }
+  else if (check_zeros(D51000Internal[,i])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+  }
+  else{
+    FC <- (median(D51000External[,i])/median(Mock5External[,i]))/(median(D51000Internal[,i])/median(Mock5Internal[,i]))
+    metabolite_list <- rbind(metabolite_list, list(names(D51000External)[i], pval, FC))
+  }
+  }
+})
+
+#assign column names
+colnames(metabolite_list) <- c("Metabolites", "pval", "foldChange")
+
+#get rid of NAs for foldChange because they are valueless
+metabolite_list <- metabolite_list[!is.na(metabolite_list$foldChange),]
+
+# Order data frame by p_val
+metabolite_list <- metabolite_list[order(metabolite_list$pval), ]
+
+#Now, split the name of the metabolites into its characteristers
+for (i in seq_along(metabolite_list$Metabolites)){
+  x <- unlist(strsplit(metabolite_list$Metabolites[i],split ="_"))
+  metabolite_list[i,4] <- x[1]
+  metabolite_list[i,5] <- x[2]
+  metabolite_list[i,6] <- x[3]
+}
+
+colnames(metabolite_list) <- c("full", "pvalue", "foldChange", "mz", "RT", "ID")
+metabolite_list$ID <- as.integer(metabolite_list$ID)
+
+#annotate
+SignificantAnnotations <- left_join(metabolite_list, annotations, by = "ID" )
+SignificantAnnotationsAndFamilies <- left_join(SignificantAnnotations, molecularFamilies, by = "FamilyCluster" )
+
+#subset to only metabolites with some form of annotations
+annotatedOnly1000Peripheral <- subset(SignificantAnnotationsAndFamilies, Analog.Compound_Name != "")
+
+# Order data frame by correlation in descending order
+annotatedOnly1000Peripheral <- annotatedOnly1000Peripheral[order(annotatedOnly1000Peripheral$pvalue), ]
+
+#adjust p-value
+annotatedOnly1000Peripheral$pAdjusted <- p.adjust(annotatedOnly1000Peripheral$pvalue, method = "fdr")
+
+#merge with family annnotations
+specificFamilyallpval05peripheralcentral1000 <- merge(annotatedOnly1000Peripheral, overallAlteredFamilies1000[,c(2,24)], by = "full", all.x = TRUE)
+
+#give specific family the annotation from family if missing
+specificFamilyallpval05peripheralcentral1000$SpecificFamily <- ifelse(is.na(specificFamilyallpval05peripheralcentral1000$SpecificFamily), specificFamilyallpval05peripheralcentral1000$Family, specificFamilyallpval05peripheralcentral1000$SpecificFamily)
+
+#write.csv(specificFamilyallpval05peripheralcentral1000, file = "peripheralcentral1000temp.csv")
+```
+
+```{r}
+overallAlteredFamiliesD1000PeripheralvCentral <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/peripheralcentral1000.csv")
+
+overallAlteredFamiliesD1000PeripheralvCentral <- overallAlteredFamiliesD1000PeripheralvCentral[overallAlteredFamiliesD1000PeripheralvCentral$pAdjusted < 0.05,]
+
+# Assuming your data frame is named df
+# Filter out families "NA", "Unannotated", and "trash"
+truncatedFamilies <- overallAlteredFamiliesD1000PeripheralvCentral %>%
+  filter(!SpecificFamily %in% c(NA, "Unannotated", "Trash", "Ketamine family", "Exposome", "Glycols", "Phosphorylcholine", "PEG", "Salts", "Terpenoid", "Monoacylglycerols", "Alkaloids", "Histamine analogs", "Acylcarnitines")) %>% #remove acylcarnitines because its only included from oversplit
+  # Group by family and filter out families with less than 5 members
+  group_by(SpecificFamily) %>%
+  filter(n() >= 4) %>%
+  ungroup()
+
+# Sort the dataframe by median foldChange value
+truncatedFamilies <- truncatedFamilies %>%
+  mutate(SpecificFamily = factor(SpecificFamily, levels = unique(SpecificFamily))) %>%
+  arrange(median(foldChange, na.rm = TRUE))
+
+D51000peripheralonly <- anti_join(truncatedFamilies, D51000SignificantOverall, by = "ID")
+D51000common <- semi_join(truncatedFamilies, D51000SignificantOverall, by = "ID")
+
+# Create boxplot
+p <- ggplot(truncatedFamilies, aes(x = reorder(SpecificFamily, foldChange, FUN = median), y = foldChange, fill = SpecificFamily)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = "Family", y = "Fold Change", title = "D5-1000 Mice Peripheral Lung") +
+  geom_hline(yintercept = 1.5, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 0.67, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 1, linetype="solid", color = "red") +
+  coord_flip(ylim = c(0,10)) +
+  scale_fill_manual(values = c("Amino Acids" = "#ff1493", 
+                               "Fatty Acids" = "#ffa500",
+                               "Eicosanoids" = "#E0B0FF",
+                               "Acylcarnitines" = "#00ff00",
+                               "Purines" = "yellow",
+                               "other" = "gray"), guide = "none") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 18, hjust = 0.5)) 
+
+p <- p + geom_jitter(data = D51000common, aes(x = SpecificFamily, y = foldChange),
+                     width = 0.1, height = 0, alpha = 0.2)
+
+p <- p + geom_jitter(data = D51000peripheralonly, aes(x = SpecificFamily, y = foldChange),
+                                       width = 0.1, height = 0, alpha = 0.5, color = "red") +
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 18, hjust = 0.5)) 
+  
+
+ggsave("PeripheryD51000.png", plot = last_plot(), device = "png", width = 9, height = 6, dpi = 300)
+```
+
+_________________________________________________________
+____                  MOCK Mice                   _______
+_________________________________________________________
+The code is very similar to the infected code, but had to be slightly different since there is not a control for the mock infected mice
+
+_________________________________________________________
+____              Periphery/Central               _______
+_________________________________________________________
+
+```{r}
+Mock_D5 <- AllSamples[AllSamples$ATTRIBUTE_State == 'Mock5',]
+Mock_D20 <- AllSamples[AllSamples$ATTRIBUTE_State == 'Mock20',]
+```
+
+```{r}
+
+MockMice <- subset(AllSamples, AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Mock20_MOCK")|
+                   AllSamples$ATTRIBUTE_state_dosage_cohort==c("Cohort2_Mock5_MOCK"))
+
+MockMiceMetadata <- MockMice[,1:26]
+
+MockMiceMetadata$ATTRIBUTE_Location_State <- paste(
+  MockMiceMetadata$ATTRIBUTE_InteriorExterior,
+  MockMiceMetadata$ATTRIBUTE_state_dosage_cohort,
+  sep = "_"
+)
+
+MockMiceFeatures <- MockMice[,27:4635]
+
+subsetMockMice <- cbind(MockMiceMetadata,MockMiceFeatures)
+
+```
+
+
+```{r}
+MockExternal <- subset(subsetMockMice, subsetMockMice$ATTRIBUTE_Location_State==c("Exterior_Cohort2_Mock5_MOCK")|subsetMockMice$ATTRIBUTE_Location_State==c("Exterior_Cohort2_Mock20_MOCK"))
+MockInternal <- subset(subsetMockMice, subsetMockMice$ATTRIBUTE_Location_State==c("Interior_Cohort2_Mock5_MOCK")|subsetMockMice$ATTRIBUTE_Location_State==c("Interior_Cohort2_Mock20_MOCK"))
+
+metabolite_list <- data.frame()
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  pval <- wilcox.test(MockExternal[,i], MockInternal[,i], paired = FALSE)$p.value
+  if (is.nan(pval)){
+    next #necessary to avoid tripping error
+  }
+  if (median(MockExternal[,i]) == 0 & median(MockInternal[,i]) == 0) {
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(MockExternal)[i], pval, FC))
+  }
+  else if (check_zeros(MockExternal[,i])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(MockExternal)[i], pval, FC))
+  }
+  else if (check_zeros(MockInternal[,i])){
+    FC <- NaN
+    metabolite_list <- rbind(metabolite_list, list(names(MockExternal)[i], pval, FC))
+  }
+  else{
+    FC <- median(MockExternal[,i])/median(MockInternal[,i])
+    metabolite_list <- rbind(metabolite_list, list(names(MockExternal)[i], pval, FC))
+  }
+  }
+})
+
+#assign column names
+colnames(metabolite_list) <- c("Metabolites", "pval", "foldChange")
+
+#get rid of NAs for foldChange because they are valueless
+metabolite_list <- metabolite_list[!is.na(metabolite_list$foldChange),]
+
+# Order data frame by p_val
+metabolite_list <- metabolite_list[order(metabolite_list$pval), ]
+
+#Now, split the name of the metabolites into its characteristers
+for (i in seq_along(metabolite_list$Metabolites)){
+  x <- unlist(strsplit(metabolite_list$Metabolites[i],split ="_"))
+  metabolite_list[i,4] <- x[1]
+  metabolite_list[i,5] <- x[2]
+  metabolite_list[i,6] <- x[3]
+}
+
+colnames(metabolite_list) <- c("full", "pvalue", "foldChange", "mz", "RT", "ID")
+metabolite_list$ID <- as.integer(metabolite_list$ID)
+
+#annotate
+SignificantAnnotations <- left_join(metabolite_list, annotations, by = "ID" )
+SignificantAnnotationsAndFamilies <- left_join(SignificantAnnotations, molecularFamilies, by = "FamilyCluster" )
+
+#subset to only metabolites with some form of annotations
+annotatedOnlyMock <- subset(SignificantAnnotationsAndFamilies, Analog.Compound_Name != "")
+
+# Order data frame by correlation in descending order
+annotatedOnlyMock <- annotatedOnlyMock[order(annotatedOnlyMock$pvalue), ]
+
+#adjust p-value
+annotatedOnlyMock$pAdjusted <- p.adjust(annotatedOnlyMock$pvalue, method = "fdr")
+
+specificFamilyAllpval05Mock <- merge(annotatedOnlyMock, overallAlteredFamilies5000[,c(2,24)], by = "full", all.x = TRUE)
+
+specificFamilyAllpval05Mock <- specificFamilyAllpval05Mock[!is.na(specificFamilyAllpval05Mock$foldChange), ]
+
+#give specific family the annotation from family if missing
+specificFamilyAllpval05Mock$SpecificFamily <- ifelse(is.na(specificFamilyAllpval05Mock$SpecificFamily), specificFamilyAllpval05Mock$Family, specificFamilyAllpval05Mock$SpecificFamily)
+
+#write.csv(specificFamilyAllpval05Mock, file = "PeripheralCentralMock.csv")
+```
+
+Family figure for Figure 6
+
+```{r}
+overallAlteredFamiliesMockPeripheralvCentral <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/PeripheralCentralMock.csv")
+
+overallAlteredFamiliesMockPeripheralvCentral <- overallAlteredFamiliesMockPeripheralvCentral[overallAlteredFamiliesMockPeripheralvCentral$pAdjusted < 0.05,]
+
+
+# Assuming your data frame is named df
+# Filter out families "NA", "Unannotated", and "trash"
+truncatedFamilies <- overallAlteredFamiliesMockPeripheralvCentral %>%
+  filter(!SpecificFamily %in% c(NA, "Unannotated", "Trash", "Ketamine family", "Exposome", "Glycols", "Phosphorylcholine", "PEG", "Salts", "Terpenoid", "Monoacylglycerols", "Alkaloids", "Histamine analogs", "Some kind of sugar")) %>% 
+  # Group by family and filter out families with less than 5 members
+  group_by(SpecificFamily) %>%
+  filter(n() >= 4) %>%
+  ungroup()
+
+# Sort the dataframe by median foldChange value
+truncatedFamilies <- truncatedFamilies %>%
+  mutate(SpecificFamily = factor(SpecificFamily, levels = unique(SpecificFamily))) %>%
+  arrange(median(foldChange, na.rm = TRUE))
+
+
+# Create boxplot
+ggplot(truncatedFamilies, aes(x = reorder(SpecificFamily, foldChange, FUN = median), y = foldChange, fill = SpecificFamily)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(position = position_jitter(width = 0.2), alpha = 0.2) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = "Family", y = "Fold Change", title = "Significantly altered metabolite families in mock-infected mice periphery") +
+  geom_hline(yintercept = 1.5, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 0.67, linetype="dashed", color = "red") +
+  geom_hline(yintercept = 1, linetype="solid", color = "red") +
+  coord_flip(ylim = c(0,10)) +
+  scale_fill_manual(values = c("Amino Acids" = "#ff1493", 
+                               "Fatty Acids" = "#ffa500",
+                               "Eicosanoids" = "#E0B0FF",
+                               "Acylcarnitines" = "#00ff00",
+                               "Purines" = "yellow",
+                               "other" = "gray"), guide = "none") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 15, hjust = 0.5)) 
+
+ggsave("PeripheryMock.png", plot = last_plot(), device = "png", width = 9, height = 6, dpi = 300)
+```
+
+_________________________________________________________
+____         MOCK Mice Violin Plot (Figure 6)     _______
+_________________________________________________________
+
+Here is an example of how the mock mice violin plot was created
+
+
+X205.1_1.17_1664
+Tryptophan
+```{r}
+boxplotMockMice <- subsetMockMice[subsetMockMice$ATTRIBUTE_InteriorExterior == "Interior"|subsetMockMice$ATTRIBUTE_InteriorExterior == "Exterior",]
+
+boxplotMockMice <- na.omit(boxplotMockMice)
+
+# Create the boxplot
+boxplot <- ggplot(boxplotMockMice, aes(x = ATTRIBUTE_InteriorExterior, y = X205.1_1.17_1664, fill = ATTRIBUTE_InteriorExterior)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), alpha = 0.75) +
+  geom_jitter(width = 0.1, alpha = 0.3) +
+  labs(x = "Treatment", y = "TIC-Normalized Signal Intensity") +
+  scale_fill_manual(values = c("#bf2ae8", "#f0da4d")) +
+  scale_x_discrete(labels = c("Peripheral", "Central")) +
+  ggtitle("Tryptophan") +
+  theme(plot.title = element_text(hjust = 0.5)) + # Centered title 
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 15, hjust = 0.5)) +
+  ylim(0, max(boxplotMockMice$X205.1_1.17_1664) + max(boxplotMockMice$X205.1_1.17_1664) * 0.15) +
+  guides(fill = FALSE)  # Remove the legend
+
+print(boxplot)
+
+ggsave("MockTryptophan.png", plot = last_plot(), device = "png", width = 6, height = 4, dpi = 300)
+
+```
+
+_________________________________________________________
+____      Venn Diagram Overlaps (Figure 1 and 4)  _______
+_________________________________________________________
+
+
+```{r}
+MockSignificantInternal <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MockSignificance/significantMockCentralMetabolites.csv")
+D51000SignificantInternal <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MockSignificance/significantInfectedandMockCentralMetabolites.csv")
+D51000SignificantOverall <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MockSignificance/significantInfected1000andMockAllMetabolites.csv")
+D55000SignficantInternal <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MockSignificance/OverallMetabolites/significantInfected5000andMockCentralMetabolites.csv")
+D55000SignificantOverall <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MockSignificance/significantInfected5000andMockAllMetabolites.csv")
+
+list_of_sets <- list(MockSignificantInternal[,"full"], D51000SignificantInternal[,"full"], D55000SignficantInternal[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("Mock", "D51000", "D55000"),
+             fill = c("cornflowerblue", "darkorchid1", "green"),
+             alpha = 0.50,
+             filename = "Day5InternalOverlap.png",
+             main = "Day 5 Significantly Altered Internal Metabolites")
+
+overlap1000 <- list(D51000SignificantOverall[,"full"], D51000SignificantInternal[,"full"])
+
+# create the Venn diagram
+venn.diagram(overlap1000, 
+             category.names = c("Overall", "Internal"),
+             fill = c("cornflowerblue", "darkorchid1"),
+             alpha = 0.50,
+             filename = "Day51000OverallvInternalOverlap.png",
+             main = "Day 5 1000 pfu Significantly Altered Overall vs Internal Metabolites")
+
+overlap5000 <- list(D55000SignificantOverall[,"full"], D55000SignficantInternal[,"full"])
+
+# create the Venn diagram
+venn.diagram(overlap5000, 
+             category.names = c("Overall", "Internal"),
+             fill = c("cornflowerblue", "darkorchid1"),
+             alpha = 0.50,
+             filename = "Day55000OverallvInternalOverlap.png",
+             main = "Day 5 5000 pfu Significantly Altered Overall vs Internal Metabolites")
+
+
+```
+
+
+```{r}
+D51000SignificantOverall <- combined_df[combined_df$Group == "D51000" & combined_df$pAdjusted < 0.05,]
+D55000SignificantOverall <-  combined_df[combined_df$Group == "D55000"& combined_df$pAdjusted < 0.05,]
+D20SignificantOverall <-  combined_df[combined_df$Group == "D20"& combined_df$pAdjusted < 0.05,]
+
+D51000v5000Overlap <- merge(D51000SignificantOverall, D55000SignificantOverall, by = "full")
+
+#x is 1000, y is 5000
+sameDirectionOverlap <- subset(D51000v5000Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+differentDirectionOverlap <- subset(D51000v5000Overlap, (foldChange.x > 1 & foldChange.y < 1) | (foldChange.x < 1 & foldChange.y > 1))
+
+sameDirection5000higher <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x))
+
+sameDirection5000lower <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x))
+
+differentDirection5000higher <- subset(differentDirectionOverlap, 
+                                 (differentDirectionOverlap$foldChange.x < 1 & differentDirectionOverlap$foldChange.y > 1))
+
+differentDirection5000lower <- subset(differentDirectionOverlap, 
+                                 (differentDirectionOverlap$foldChange.x > 1 & differentDirectionOverlap$foldChange.y < 1))
+
+list_of_sets <- list(sameDirection5000higher[,"full"], sameDirection5000lower[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("D5-5000 Larger Fold Change", "D5-1000 Larger Fold Change"),
+             fill = c("#BEBEFE","#FF8719"),
+             alpha = 0.50,
+             filename = "Day5OverallOverlapFoldChangeComparison.png",
+             main = "Metabolites significantly altered in D5 infected mice")
+
+list_of_sets <- list(D51000SignificantOverall[,"full"], D55000SignificantOverall[,"full"], D20SignificantOverall[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("D5-1000", "D5-5000", "D20-1000"),
+             fill = c("#FF8719","#BEBEFE", "#FF0E0D"),
+             alpha = 0.50,
+             filename = "OverallOverlap.png",
+             main = "Metabolites significantly altered in infected mice")
+
+D51000vD20Overlap <- merge(D51000SignificantOverall, D20SignificantOverall, by = "full")
+
+sameDirectionOverlap <- subset(D51000vD20Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+differentDirectionOverlap <- subset(D51000vD20Overlap, (foldChange.x > 1 & foldChange.y < 1) | (foldChange.x < 1 & foldChange.y > 1))
+
+sameDirectionD20higher <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x))
+
+sameDirectionD20lower <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x))
+
+differentDirectionD20higher <- subset(differentDirectionOverlap, 
+                                 (differentDirectionOverlap$foldChange.x < 1 & differentDirectionOverlap$foldChange.y > 1))
+
+differentDirectionD20lower <- subset(differentDirectionOverlap, 
+                                 (differentDirectionOverlap$foldChange.x > 1 & differentDirectionOverlap$foldChange.y < 1))
+
+list_of_sets <- list(sameDirection5000higher[,"full"], sameDirection5000lower[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("D5-5000 Larger Fold Change", "D5-1000 Larger Fold Change"),
+             fill = c("#BEBEFE","#FF8719"),
+             alpha = 0.50,
+             filename = "Day5OverallOverlapFoldChangeComparison.png",
+             main = "Metabolites significantly altered in D5 infected mice")
+
+```
+
+
+Code to identify number of metabolites with same direction of fold change
+
+```{r}
+
+D51000SignificantOverall <- combined_df[combined_df$Group == "D51000" & combined_df$pAdjusted < 0.05,]
+D55000SignificantOverall <-  combined_df[combined_df$Group == "D55000"& combined_df$pAdjusted < 0.05,]
+D20SignificantOverall <-  combined_df[combined_df$Group == "D20"& combined_df$pAdjusted < 0.05,]
+temp <- combined_df[combined_df$Group == "D20",]
+#D51000 and D55000
+D51000v5000Overlap <- merge(D51000SignificantOverall, D55000SignificantOverall, by = "full")
+# Find overlaps
+overlap_1 <- intersect(D51000SignificantOverall$full, D55000SignificantOverall$full)
+overlap_1 <- setdiff(overlap_1, D20SignificantOverall$full)
+#subset DF to only include metabolites unique to D51000 and D55000
+filtered_D51000v5000Overlap <- subset(D51000v5000Overlap, full %in% overlap_1)
+D51000v5000OverlapSameDirection <- subset(filtered_D51000v5000Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+
+#D51000 and D20
+D51000vD20Overlap <- merge(D51000SignificantOverall, D20SignificantOverall, by = "full")
+# Find overlaps
+overlap_2 <- intersect(D51000SignificantOverall$full, D20SignificantOverall$full)
+overlap_2 <- setdiff(overlap_2, D55000SignificantOverall$full)
+#subset DF to only include metabolites unique to D51000 and D55000
+filtered_D51000vD20Overlap <- subset(D51000vD20Overlap, full %in% overlap_2)
+D51000vD20OverlapSameDirection <- subset(filtered_D51000vD20Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+#D20 and D55000
+D20v5000Overlap <- merge(D20SignificantOverall, D55000SignificantOverall, by = "full")
+# Find overlaps
+overlap_3 <- intersect(D20SignificantOverall$full, D55000SignificantOverall$full)
+overlap_3 <- setdiff(overlap_3, D51000SignificantOverall$full)
+#subset DF to only include metabolites unique to D51000 and D55000
+filtered_D20v5000Overlap <- subset(D20v5000Overlap, full %in% overlap_3)
+D20v5000OverlapOverlapSameDirection <- subset(filtered_D20v5000Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+#all
+allOverlap <- merge(D51000v5000Overlap, D20SignificantOverall, by = "full")
+
+allOverlapSameDirection <- subset(allOverlap, (foldChange.x > 1 & foldChange.y > 1 & foldChange > 1) | (foldChange.x < 1 & foldChange.y < 1 & foldChange < 1))
+
+length(D51000v5000OverlapSameDirection$full)/length(filtered_D51000v5000Overlap$full)
+length(D51000vD20OverlapSameDirection$full)/length(filtered_D51000vD20Overlap$full)
+length(D20v5000OverlapOverlapSameDirection$full)/length(filtered_D20v5000Overlap$full)
+length(allOverlapSameDirection$full)/length(allOverlap$full)
+
+#D5-1000 only
+overlap_4 <- setdiff(D51000SignificantOverall$full, D55000SignificantOverall$full)
+overlap_4 <- setdiff(overlap_4, D20SignificantOverall$full)
+#subset DF to only include metabolites unique to D51000 and D55000
+onlyD51000 <- subset(D51000SignificantOverall, full %in% overlap_4)
+
+#D20-1000 only
+overlap_5 <- setdiff(D20SignificantOverall$full, D55000SignificantOverall$full)
+overlap_5 <- setdiff(overlap_5, D51000SignificantOverall$full)
+#subset DF to only include metabolites unique to D51000 and D55000
+onlyD20 <- subset(D20SignificantOverall, full %in% overlap_5)
+
+```
+
+
+```{r}
+
+
+D51000v5000Overlap <- merge(D51000PeripheryList, D55000PeripheryList, by = "full")
+
+sameDirectionOverlap <- subset(D51000v5000Overlap, (foldChange.x > 1 & foldChange.y > 1) | (foldChange.x < 1 & foldChange.y < 1))
+
+sameDirection5000higher <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x))
+
+sameDirection5000lower <- subset(sameDirectionOverlap, 
+                               (sameDirectionOverlap$foldChange.x < 1 & sameDirectionOverlap$foldChange.y > sameDirectionOverlap$foldChange.x) |
+                                 (sameDirectionOverlap$foldChange.x > 1 & sameDirectionOverlap$foldChange.y < sameDirectionOverlap$foldChange.x))
+
+D51000PeripheryListSig <- D51000PeripheryList[D51000PeripheryList$pAdjusted < 0.05,]
+D55000PeripheryListSig <- D55000PeripheryList[D55000PeripheryList$pAdjusted < 0.05,]
+D20PeripheryListSig <- D20PeripheryList[D20PeripheryList$pAdjusted < 0.05,]
+
+list_of_sets <- list(D51000PeripheryListSig[,"full"], D55000PeripheryListSig[,"full"], D20PeripheryListSig[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("D5-1000", "D5-5000", "D20-1000"),
+             fill = c("#FF8719","#BEBEFE", "#FF0E0D"),
+             alpha = 0.50,
+             filename = "PeripheralOverlap.png",
+             main = "Metabolites significantly altered in the peripheral lung tissue of infected mice")
+
+list_of_sets <- list(significant1000[,"full"], significant1000periphery[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("Overall Lung D5-1000", "Peripheral Lung D5-1000"),
+             fill = c("#FF8719", "#f5bf42"),
+             alpha = 0.50,
+             filename = "D51000PeripheralOverlap.png",
+             resolution = 300,
+             Height = 12,
+             Width = 12,
+             main = "D5-1000 Significantly Metabolites - Overall vs Peripheral")
+
+list_of_sets <- list(significant5000[,"full"], significant5000periphery[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("Overall Lung D5-5000", "Peripheral Lung D5-5000"),
+             fill = c("#BEBEFE", "#BEEEEE"),
+             alpha = 0.50,
+             filename = "D55000PeripheralOverlap.png",
+             main = "D5-5000 Significantly Metabolites - Overall vs Peripheral")
+
+
+list_of_sets <- list(significantD20[,"full"], significantD20periphery[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("Overall Lung D5-1000", "Peripheral Lung D5-1000"),
+             fill = c("#FF0E0D", "#FFAAAA"),
+             alpha = 0.50,
+             filename = "D20PeripheralOverlap.png",
+             main = "D20-1000 Significantly Metabolites - Overall vs Peripheral")
+
+# Create the Venn diagram
+D51000Sets <- list("Overall Lung D5-1000" = c(D51000SignificantOverall[, "full"]), "Peripheral Lung D5-1000" = c(D51000PeripheryListSig[, "full"]))
+D55000Sets <- list("Overall Lung D5-5000" = c(D55000SignificantOverall[, "full"]), "Peripheral Lung D5-5000" = c(D55000PeripheryListSig[, "full"]))
+D20Sets <- list("Overall Lung D20-1000" = c(D20SignificantOverall[, "full"]), "Peripheral Lung D20-1000" = c(D20PeripheryListSig[, "full"]))
+
+D51000Venn <- ggvenn(D51000Sets,
+       fill_color = c("#FF8719", "#f5bf42"),
+       stroke_size = 0.5, 
+       set_name_size = 5,
+       text_size = 6,
+       show_percentage = FALSE
+)
+
+D55000Venn <- ggvenn(D55000Sets,
+       fill_color = c("#BEBEFE", "#BEEEEE"),
+       stroke_size = 0.5, 
+       set_name_size = 5,
+       text_size = 6,
+       show_percentage = FALSE
+)
+
+D20Venn <- ggvenn(D20Sets,
+       fill_color = c("#FF0E0D", "#FFAAAA"),
+       stroke_size = 0.5, 
+       set_name_size = 5,
+       text_size = 6,
+       show_percentage = FALSE
+)
+
+# Export the Venn diagram as a PNG file
+ggsave("D51000OverallvPeripheryvenn_diagram.png", plot = D51000Venn, width = 9, height = 6, dpi = 300)
+ggsave("D55000OverallvPeripheryvenn_diagram.png", plot = D55000Venn, width = 9, height = 6, dpi = 300)
+ggsave("D20OverallvPeripheryvenn_diagram.png", plot = D20Venn, width = 9, height = 6, dpi = 300)
+
+```
+Metabolites unique to periphery
+
+```{r}
+D51000PeripheryOnly <- anti_join(D51000PeripheryListSig, D51000SignificantOverall, by = "ID")
+D55000PeripheryOnly <- anti_join(D55000PeripheryListSig, D55000SignificantOverall, by = "ID")
+D201000PeripheryOnly <- anti_join(D20PeripheryListSig, D20SignificantOverall, by = "ID")
+
+list_of_sets <- list(D51000PeripheryOnly[,"full"], D55000PeripheryOnly[,"full"], D201000PeripheryOnly[,"full"])
+
+# create the Venn diagram
+venn.diagram(list_of_sets, 
+             category.names = c("D5-1000", "D5-5000", "D20-1000"),
+             fill = c("#FF8719","#BEBEFE", "#FF0E0D"),
+             alpha = 0.50,
+             filename = "OnlyinPeripheralOverlap.png",
+             main = "Metabolites significantly altered in the peripheral lung tissue of infected mice")
+
+xD51000peripheryonly <- anti_join(anti_join(D51000PeripheryOnly, D55000PeripheryOnly, by = "ID"), D201000PeripheryOnly, by = "ID")
+xD55000peripheryonly <- anti_join(anti_join(D55000PeripheryOnly, D51000PeripheryOnly, by = "ID"), D201000PeripheryOnly, by = "ID")
+xD201000peripheryonly <- anti_join(anti_join(D201000PeripheryOnly, D55000PeripheryOnly, by = "ID"), D51000PeripheryOnly, by = "ID")
+zAllPeriphery <- semi_join(semi_join(D51000PeripheryOnly, D55000PeripheryOnly, by = "ID"), D201000PeripheryOnly, by = "ID")
+yD51000peripheryandD55000 <- anti_join(semi_join(D51000PeripheryOnly, D55000PeripheryOnly, by = "ID"), zAllPeriphery, by = "ID")
+yD51000peripheryandD201000 <- anti_join(semi_join(D51000PeripheryOnly, D201000PeripheryOnly, by = "ID"), zAllPeriphery, by = "ID")
+yD55000peripheryandD201000 <- anti_join(semi_join(D55000PeripheryOnly, D201000PeripheryOnly, by = "ID"), zAllPeriphery, by = "ID")
+
+
+
+```
+
+_________________________________________________________
+____            Volcano Plots (Figure 1)          _______
+_________________________________________________________
+
+
+```{r}
+setwd("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MetaboAnalyst")
+
+C2_D5_1000 <- AllSamples[AllSamples$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Infected_D5_OneThousand',]
+C2_MOCK5 <- AllSamples[AllSamples$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Mock5_MOCK',]
+C2_D5_5000 <- AllSamples[AllSamples$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Infected_D5_FiveThousand',]
+C2_D20 <- AllSamples[AllSamples$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Infected_20D_OneThousand',]
+C2_Mock20 <- AllSamples[AllSamples$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Mock20_MOCK',]
+
+volcanoDF <- data.frame()
+for (i in 27:4635){
+  if (median(C2_D5_1000[,i]) > 0){
+    if (median(C2_MOCK5[,i]) > 0){
+      logFC <- as.numeric(log2(median(C2_D5_1000[,i])/median(C2_MOCK5[,i])))
+      Pval <- as.numeric((wilcox.test(C2_D5_1000[,i],C2_MOCK5[,i])$p.value))
+      volcanoDF <- rbind(volcanoDF, data.frame(names(C2_D5_1000)[i], featuresAnnotated[4,i-25], featuresAnnotated[2,i-25], featuresAnnotated[3,i-25], logFC, Pval))
+    }
+  }
+}
+
+#adjust families real quick
+#write.csv(volcanoDF, file = 'd5100Volcano.csv')
+
+#read it back
+volcanoDF <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MetaboAnalyst/d5100Volcano.csv", fileEncoding = 'UTF-8-BOM')
+
+volcanoDF$p_adjusted <- p.adjust(volcanoDF$Pval, method = "fdr")
+volcanoDF$logp_adjusted <- -log10(volcanoDF$p_adjusted)
+emphasis <- volcanoDF[volcanoDF[,1] == 'X204.12_0.29_377' | #acetylcarnitine
+            volcanoDF[,1] == 'X158.15_2.74_4841',] #hyocholic acid
+
+print(dim(volcanoDF[volcanoDF$logp_adjusted > 1.301 & volcanoDF$logFC > 1,])[1])
+print(dim(volcanoDF[volcanoDF$logp_adjusted > 1.301 & volcanoDF$logFC < -1,])[1])
+
+# Create a volcano plot
+p <- ggplot(volcanoDF, aes(x = logFC, y = logp_adjusted)) +
+  geom_point(aes(color = ifelse(logFC > 1 & logp_adjusted > 1.301, "Greater than 1",
+                                 ifelse(logFC < -1 & logp_adjusted > 1.301, "Less than -1", "Between -1 and 1")), 
+                 shape = logp_adjusted > 1.301),
+             size = 3) +
+  scale_color_manual(values = c("grey", "#0eb340", "red")) +
+#  geom_point(aes(color = abs(logFC) > 1, shape = logp_adjusted > 1.301), size = 3) +
+  #scale_color_manual(values = c("grey", "red")) +
+  scale_shape_manual(values = c(1, 16)) +
+  labs(x = "Log2 Fold-Change", y = "-log10(p-value)") +
+  theme_bw() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+  theme(legend.position = "none")
+
+p + geom_point(data = emphasis, pch = 21, size = 5)
+
+#ggsave("D20D51000VolcanoPlot.png", plot = p, width = 6, height = 4, units = "in", dpi = 300)
+
+write.csv(volcanoDF, "D51000Mock5VolcanoPlot.csv")
+
+```
+
+
+_________________________________________________________
+      Metabolites of Interest List (Supplemental 5)
+_________________________________________________________
+
+```{r}
+mockPeripheryvCentral <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/PeripheralCentralMock.csv")
+D51000List <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/significantInfected1000andMockAllMetabolites.csv")
+D55000List <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/significantInfected5000andMockAllMetabolites.csv")
+D20List <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/alteredFamiliesSignificantD20AllMetabolites.csv")
+D51000PeripheryList <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/peripheralcentral1000.csv")
+D55000PeripheryList <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/peripheralcentral5000.csv")
+D20PeripheryList <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MockSignificance/peripheralcentralD20.csv")
+annotations <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/COVIDCohort2FMNInteriorExterior/FBMN2/ShortenedNodesNoSuspect.csv")
+correlations <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/ViralLoadsAndCorrelations/allCorrelationsD5.csv")
+
+metaboliteDict <- list(Glutamate = 304, Glutamine = 485, Aspartate = 531, Methionine = 808, Arginine = 204, Threonine = 401, Tyrosine = 993, Phenylalanine = 1387, Tryptophan = 1664, Kynurenine = 1414, Lysine = 78, PalmitaticAcid = 8022, EpoxyeicosatetraenoicAcid = 6337, ArachidoniocAcid = 8265, DocosahexaenoicAcid = 6962, EicosapentaenoicAcid = 7318, ProstaglandinD2 = 4336, ProstaglandinF2alpha = 4343, ProstaglandinI3 = 4097, HETE = 6841, UnannotatedSeries2Prostaglandin = 3739, UnannotatedSeries3Prostaglandin = 3803, Deoxycarnitine = 336, Carnitine = 220, Acetylcarnitine = 811, Propionylcarnitine = 1232, Isovalerylcarnitine = 2136, Hydroxybutyrlcarnitine = 455, Hexanoylcarnitine = 3105, Myristoylcarnitine = 5336, Palmitoylcarnitine = 6040, Oleoylcarnitine = 6253, Stearoylcarnitine = 6739, Arachidonoylcarnitine = 5865, Urate = 783, Guanine = 1142, guanosine = 1084, Inosine = 1107, Xanthine = 957, AMP = 928, DAMP = 677, deoxyadenosine = 921, CitrullineAnalog = 871, Creatinine = 426,  SAdensoyl = 253, GlutathioneAnalog = 1080, palmitamide = 7978, octadecanamide = 8709,  GlycerophosphocholineAnalog = 188, Glycerophosphorylcholine = 600, PhosphocholineAnalog = 108, PC_14_0 = 5191, PC_16_1 = 5545, PC_17_0 = 6456, PC_18_0 = 6947, PC_18_1 = 6304, PC_20_5 = 5646, PC_14_0_16_0 = 10393 )
+                       
+                       
+
+                       
+metabolitelist <- names(metaboliteDict)
+idList <- unlist(unname(metaboliteDict))
+
+```
+
+```{r}
+mzList <- c()
+rtList <- c()
+mockPeriList <- c()
+Overall1000List <- c()
+Overall5000List <- c()
+OverallD20List <- c()
+Peri1000List <- c()
+Peri5000List <- c()
+PeriD20List <- c()
+correlationList <- c()
+
+for (i in idList){
+  mz <- annotations[annotations$ID == i,]$parent.mass
+  rt <- annotations[annotations$ID == i,]$RTConsensus
+  mzList <- c(mzList, mz)
+  rtList <- c(rtList, rt)
+}
+
+
+for (i in idList){
+  mockPeriListFC <- mockPeripheryvCentral[mockPeripheryvCentral$ID == i,]$foldChange
+  mockPeriListpVal <- mockPeripheryvCentral[mockPeripheryvCentral$ID == i,]$pAdjusted
+  if (length(mockPeriListFC) == 0){
+    mockPeriListFC <- NA
+  }
+  if (length(mockPeriListpVal) == 0){
+  mockPeriListpVal <- NA
+  }
+  combined <- paste0(round(mockPeriListFC, 2), "; ", format(mockPeriListpVal, scientific = TRUE, digits = 3))
+  mockPeriList <- c(mockPeriList, combined)
+}
+
+
+for (i in idList){
+  overall1000FC <- D51000List[D51000List$ID == i,]$foldChange
+  overall1000pVal <- D51000List[D51000List$ID == i,]$pAdjusted
+  if (length(overall1000FC) == 0){
+    overall1000FC <- NA
+  }
+  if (length(overall1000pVal) == 0){
+  overall1000pVal <- NA
+  }
+  combined <- paste0(round(overall1000FC, 2), "; ", format(overall1000pVal, scientific = TRUE, digits = 3))
+  Overall1000List <- c(Overall1000List, combined)
+}
+
+for (i in idList){
+  overall5000FC <- D55000List[D55000List$ID == i,]$foldChange
+  overall5000pVal <- D55000List[D55000List$ID == i,]$pAdjusted
+  if (length(overall5000FC) == 0){
+    overall5000FC <- NA
+  }
+  if (length(overall5000pVal) == 0){
+  overall5000pVal <- NA
+  }
+  combined <- paste0(round(overall5000FC, 2), "; ", format(overall5000pVal, scientific = TRUE, digits = 3))
+  Overall5000List <- c(Overall5000List, combined)
+}
+
+for (i in idList){
+  overallD20FC <- D20List[D20List$ID == i,]$foldChange
+  overallD20pVal <- D20List[D20List$ID == i,]$pAdjusted
+  if (length(overallD20FC) == 0){
+    overallD20FC <- NA
+  }
+  if (length(overallD20pVal) == 0){
+  overallD20pVal <- NA
+  }
+  combined <- paste0(round(overallD20FC, 2), "; ", format(overallD20pVal, scientific = TRUE, digits = 3))
+  OverallD20List <- c(OverallD20List, combined)
+}
+
+for (i in idList){
+  Peri1000ListFC <- D51000PeripheryList[D51000PeripheryList$ID == i,]$foldChange
+  Peri1000ListpVal <- D51000PeripheryList[D51000PeripheryList$ID == i,]$pAdjusted
+  if (length(Peri1000ListFC) == 0){
+    Peri1000ListFC <- NA
+  }
+  if (length(Peri1000ListpVal) == 0){
+  Peri1000ListpVal <- NA
+  }
+  combined <- paste0(round(Peri1000ListFC, 2), "; ", format(Peri1000ListpVal, scientific = TRUE, digits = 3))
+  Peri1000List <- c(Peri1000List, combined)
+}
+
+for (i in idList){
+  Peri5000ListFC <- D55000PeripheryList[D55000PeripheryList$ID == i,]$foldChange
+  Peri5000ListpVal <- D55000PeripheryList[D55000PeripheryList$ID == i,]$pAdjusted
+  if (length(Peri5000ListFC) == 0){
+    Peri5000ListFC <- NA
+  }
+  if (length(Peri5000ListpVal) == 0){
+  Peri5000ListpVal <- NA
+  }
+  combined <- paste0(round(Peri5000ListFC, 2), "; ", format(Peri5000ListpVal, scientific = TRUE, digits = 3))
+  Peri5000List <- c(Peri5000List, combined)
+}
+
+for (i in idList){
+  PeriD20ListFC <- D20PeripheryList[D20PeripheryList$ID == i,]$foldChange
+  PeriD20ListpVal <- D20PeripheryList[D20PeripheryList$ID == i,]$pAdjusted
+  if (length(PeriD20ListFC) == 0){
+    PeriD20ListFC <- NA
+  }
+  if (length(PeriD20ListpVal) == 0){
+  PeriD20ListpVal <- NA
+  }
+  combined <- paste0(round(PeriD20ListFC, 2), "; ", format(PeriD20ListpVal, scientific = TRUE, digits = 3))
+  PeriD20List <- c(PeriD20List, combined)
+}
+
+for (i in idList){
+  correlationValue <- correlations[correlations$ID == i,]$Correlation
+  correlationpValue <- correlations[correlations$ID == i,]$p_adjusted
+  if (length(PeriD20ListFC) == 0){
+    correlationValue <- NA
+  }
+  if (length(PeriD20ListpVal) == 0){
+    correlationpValue <- NA
+  }
+  combined <- paste0(round(correlationValue, 2), "; ", format(correlationpValue, scientific = TRUE, digits = 3))
+  correlationList <- c(correlationList, combined)
+}
+
+metabolitesOfInterestDF <- data.frame(Molecule = metabolitelist,
+                                      MZ = mzList,
+                                      RT = rtList,
+                                      ID = idList,
+                                      MockPeriphery = mockPeriList,
+                                      Overall1000 = Overall1000List,
+                                      Overall5000 = Overall5000List,
+                                      OverallD20 = OverallD20List,
+                                      Peripherl1000 = Peri1000List,
+                                      Peripherl5000 = Peri5000List,
+                                      PeripherlD20 = PeriD20List,
+                                      Correlation = correlationList
+                                      )
+
+write.csv(metabolitesOfInterestDF, "metabolitesOfInterestDF.csv")
+```
+
+_________________________________________________________
+____        Individual Family Plots Figure 2      _______
+_________________________________________________________
+
+Example of the individual family plots using the Amino Acid family
+
+```{r}
+all_AA_df <- subset(combined_df, SpecificFamily == "Amino Acids")
+methionine <- subset(all_AA_df, ID == 808)
+AA_subset_df <- all_AA_df[-which(all_AA_df$ID == 808), ]
+arginine <- subset(AA_subset_df, ID == 204)
+AA_subset_df <- AA_subset_df[-which(AA_subset_df$ID == 204), ]
+tryptophan <- subset(AA_subset_df, ID == 1664)
+AA_subset_df <- AA_subset_df[-which(AA_subset_df$ID == 1664), ]
+glutamate <- subset(AA_subset_df, ID == 304)
+AA_subset_df <- AA_subset_df[-which(AA_subset_df$ID == 304), ]
+
+
+# Create the boxplot with all datapoints
+AAviolinplot <- ggplot(all_AA_df, aes(x = Group, y = foldChange, fill = Group)) +
+  geom_hline(yintercept = 1, color = "red") + 
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), alpha = 0.75) +
+  labs(x = "Infection Group", y = "Fold Change") +
+  ggtitle("Amino Acids") +
+  scale_fill_manual(values = cohort_colors) +
+  scale_x_discrete(labels = c("D5-1000", "D5-5000", "D20-1000")) +
+  guides(fill = FALSE) + # Remove the legend
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 18, hjust = 0.5)) 
+
+
+#add in the non-specific points
+AAviolinplot <- AAviolinplot + geom_jitter(data = AA_subset_df, aes(x = Group, y = foldChange), width = 0.1, height = 0, alpha = 0.3, 
+                                       shape = ifelse(AA_subset_df$pAdjusted > 0.05, 1, 16))
+
+#add in each individual important point
+AAviolinplot <- AAviolinplot + geom_jitter(data = methionine, aes(x = Group, y = foldChange),
+                                       width = 0.1, height = 0, alpha = 0.7,
+                                       color = "#e6194B", size = 3, 
+                                       shape = ifelse(methionine$pAdjusted > 0.05, 1, 16))
+  
+AAviolinplot <- AAviolinplot + geom_jitter(data = arginine, aes(x = Group, y = foldChange),
+                                       width = 0.1, height = 0, alpha = 0.7,
+                                       color = "#f58231", size = 3, 
+                                       shape = ifelse(arginine$pAdjusted > 0.05, 1, 16))
+
+AAviolinplot <- AAviolinplot + geom_jitter(data = tryptophan, aes(x = Group, y = foldChange),
+                                       width = 0.1, height = 0, alpha = 0.7,
+                                       color = "#3cb44b", size = 3, 
+                                       shape = ifelse(tryptophan$pAdjusted > 0.05, 1, 16))
+
+AAviolinplot <- AAviolinplot + geom_jitter(data = glutamate, aes(x = Group, y = foldChange),
+                                       width = 0.1, height = 0, alpha = 0.7,
+                                       color = "#f032e6", size = 3, 
+                                       shape = ifelse(glutamate$pAdjusted > 0.05, 1, 16))
+
+
+print(AAviolinplot)
+# Print the plot
+ggsave("AminoAcidViolinPlot.png", plot = AAviolinplot, width = 6, height = 4, dpi = 300)
+
+
+```
+
+_________________________________________________________
+____      Overall/Internal/External (Figure 5)    _______
+_________________________________________________________
+
+
+The following code is not elegant, but works
+
+```{r}
+#make copies of each dataframe
+
+D51000Normalized <- subset(subsetD51000Mice, subsetD51000Mice$ATTRIBUTE_Dosage==c("OneThousand"))
+D51000ExternalNormalized <- D51000External
+D51000InternalNormalized <- D51000Internal
+D55000Normalized <- subset(subsetD55000Mice, subsetD55000Mice$ATTRIBUTE_Dosage==c("FiveThousand"))
+D55000ExternalNormalized <- D55000External
+D55000InternalNormalized <- D55000Internal
+D20Normalized <- subset(subsetD20Mice, subsetD20Mice$ATTRIBUTE_Dosage==c("OneThousand"))
+D20ExternalNormalized <- D20External
+D20InternalNormalized <- D20Internal
+Mock5Normalized <- subset(subsetD51000Mice, subsetD51000Mice$ATTRIBUTE_Dosage==c("MOCK"))
+Mock20Normalized <- subset(subsetD20Mice, subsetD20Mice$ATTRIBUTE_Dosage==c("MOCK"))
+
+#Add the group label
+D51000Normalized$Group <- "D5-1000"
+D51000ExternalNormalized$Group <- "D5-1000"
+D51000InternalNormalized$Group <- "D5-1000"
+D55000Normalized$Group <- "D5-5000"
+D55000ExternalNormalized$Group <- "D5-5000"
+D55000InternalNormalized$Group <- "D5-5000"
+D20Normalized$Group <- "D20-1000"
+D20ExternalNormalized$Group <- "D20-1000"
+D20InternalNormalized$Group <- "D20-1000"
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5Normalized[,i]) == 0) { 
+    D51000Normalized[, i] <- NA
+  }
+  else if (check_zeros(D51000Normalized[,i])){
+    D51000Normalized[, i] <- NA
+  }
+  else{
+    D51000Normalized[, i] <- D51000Normalized[, i] / median(Mock5Normalized[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5Internal[,i]) == 0) {
+    D51000InternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D51000InternalNormalized[,i])){
+    D51000InternalNormalized[, i] <- NA
+  }
+  else{
+    D51000InternalNormalized[, i] <- D51000InternalNormalized[, i] / median(Mock5Internal[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5External[,i]) == 0) {
+    D51000ExternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D51000ExternalNormalized[,i])){
+    D51000ExternalNormalized[, i] <- NA
+  }
+  else{
+    D51000ExternalNormalized[, i] <- D51000ExternalNormalized[, i] / median(Mock5External[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5Normalized[,i]) == 0) { 
+    D55000Normalized[, i] <- NA
+  }
+  else if (check_zeros(D55000Normalized[,i])){
+    D55000Normalized[, i] <- NA
+  }
+  else{
+    D55000Normalized[, i] <- D55000Normalized[, i] / median(Mock5Normalized[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5Internal[,i]) == 0) {
+    D55000InternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D55000InternalNormalized[,i])){
+    D55000InternalNormalized[, i] <- NA
+  }
+  else{
+    D55000InternalNormalized[, i] <- D55000InternalNormalized[, i] / median(Mock5Internal[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock5External[,i]) == 0) {
+    D55000ExternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D55000ExternalNormalized[,i])){
+    D55000ExternalNormalized[, i] <- NA
+  }
+  else{
+    D55000ExternalNormalized[, i] <- D55000ExternalNormalized[, i] / median(Mock5External[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock20Normalized[,i]) == 0) {
+    D20Normalized[, i] <- NA
+  }
+  else if (check_zeros(D20Normalized[,])){
+    D20Normalized[, i] <- NA
+  }
+  else{
+    D20Normalized[, i] <- D20Normalized[, i] / median(Mock20Normalized[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock20Internal[,i]) == 0) {
+    D20InternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D20InternalNormalized[,i])){
+    D20InternalNormalized[, i] <- NA
+  }
+  else{
+    D20InternalNormalized[, i] <- D20InternalNormalized[, i] / median(Mock20Internal[,i])
+  }
+  }
+})
+
+#cycle through every column
+suppressWarnings({ 
+for (i in 28:4636) {
+  if (median(Mock20External[,i]) == 0) {
+    D20ExternalNormalized[, i] <- NA
+  }
+  else if (check_zeros(D20ExternalNormalized[,i])){
+    D20ExternalNormalized[, i] <- NA
+  }
+  else{
+    D20ExternalNormalized[, i] <- D20ExternalNormalized[, i] / median(Mock20External[,i])
+  }
+  }
+})
+
+
+# Combine the dataframes into one dataframe
+periCentralD51000_df <- bind_rows(
+  mutate(D51000Normalized, dataframe = "Overall"),
+  mutate(D51000ExternalNormalized, dataframe = "Peripheral"),
+  mutate(D51000InternalNormalized, dataframe = "Central")
+)
+
+periCentralD55000_df <- bind_rows(
+  mutate(D55000Normalized, dataframe = "Overall"),
+  mutate(D55000ExternalNormalized, dataframe = "Peripheral"),
+  mutate(D55000InternalNormalized, dataframe = "Central")
+)
+
+
+periCentralD201000_df <- bind_rows(
+  mutate(D20Normalized, dataframe = "Overall"),
+  mutate(D20ExternalNormalized, dataframe = "Peripheral"),
+  mutate(D20InternalNormalized, dataframe = "Central")
+)
+
+combined_pericentral_df <- rbind(periCentralD51000_df, periCentralD55000_df, periCentralD201000_df)
+combined_pericentral_df$Group <- factor(combined_pericentral_df$Group, levels = c("D5-1000", "D5-5000", "D20-1000"))
+combined_pericentral_df$dataframe <- factor(combined_pericentral_df$dataframe, levels = c("Overall", "Central", "Peripheral"))
+```
+
+Tryptophan example 
+
+```{r}
+filtered_df <- combined_pericentral_df %>%
+  select(X205.1_1.17_1664, dataframe, Group)
+
+filtered_df$X205.1_1.17_1664 <- as.numeric(as.character(filtered_df$X205.1_1.17_1664))
+
+# Create the boxplot
+tryptophanPeriCentral <- ggplot(filtered_df, aes(x = dataframe, y = X205.1_1.17_1664, fill = Group)) +
+  geom_hline(yintercept = 1, color = "red") + 
+  geom_boxplot() +
+  labs(y = "Mock-Normalized Signal Intensity") +
+  ggtitle("Tryptophan") +
+  scale_fill_manual(values = c("D5-1000" = "#ffcea1", 
+                   "D5-5000" = "#BEBEFE",
+                   "D20-1000" = "#ffa1a1")) +
+  guides(fill = FALSE) + # Remove the legend
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14), 
+        axis.text.y = element_text(size = 14),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 16),
+        plot.title = element_text(size = 18, hjust = 0.5)) +
+  ylim(0, max(filtered_df$X205.1_1.17_1664) + 1)
+
+pwc <- filtered_df %>%
+  group_by(Group) %>%
+  wilcox_test(X205.1_1.17_1664 ~ dataframe, p.adjust.method = "bonferroni")
+
+pwc <- pwc[pwc$p.adj.signif != "ns",]
+
+pwc <- pwc %>% add_xy_position(x = "dataframe", group = "Group", dodge = 0.8)
+
+# Print the plot
+ggsave("TryptophanPeriCentral.png", plot = tryptophanPeriCentral, width = 6, height = 4, dpi = 300)
+
+tryptophanPeriCentral +
+  stat_pvalue_manual(
+    pwc, color = "Group", step.group.by = "Group",
+    label = "p.adj",
+    tip.length = 0,
+    size = 5,
+    palette = c("#ffcea1", "#BEBEFE", "#ffa1a1"),
+    ) + guides(color = FALSE)
+```
+
+#________________________________________________________________________________
+
+                       Viral Load Correlatiton
+
+#________________________________________________________________________________
+
+```{r}
+ViralLoads <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/6b_NoOutliers_ViralLoad_ONLY_COHORT2_OnlySamples.csv")
+annotations <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/COVIDCohort2FMNInteriorExterior/FBMN2/ShortenedNodesNoSuspect.csv")
+ViralLoads_D5 <- ViralLoads[ViralLoads$ATTRIBUTE_State == 'Infected_D5',]
+ViralLoads_D20 <- ViralLoads[ViralLoads$ATTRIBUTE_State == 'Infected_20D',]
+ViralLoads_D51000 <- ViralLoads[ViralLoads$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Infected_D5_OneThousand',]
+ViralLoads_D55000 <- ViralLoads[ViralLoads$ATTRIBUTE_state_dosage_cohort == 'Cohort2_Infected_D5_FiveThousand',]
+molecularFamilies <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/MolecularFamiliesCSV.csv", fileEncoding = 'UTF-8-BOM')
+```
+
+D5
+
+
+```{r}
+
+setwd("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa Cohort2/ViralLoadsAndCorrelations/")
+
+# Initialize an empty list to store correlations
+correlation_list <- list()
+p_value_list <- list()
+
+# Loop through columns and calculate correlations
+suppressWarnings({ 
+  for (i in 27:4635) {
+    corr <- cor.test(ViralLoads_D5$ATTRIBUTE_Viral_Load, ViralLoads_D5[, i], method = "spearman")
+    correlation_list <- c(correlation_list, list(data.frame(Column = names(ViralLoads_D5)[i], Correlation = corr$estimate)))
+    p_value_list <- c(p_value_list, list(data.frame(Column = names(ViralLoads_D5)[i], pval = corr$p.value)))
+  }
+})
+
+# Combine the list of correlation data frames into one data frame
+cor_df <- do.call(rbind, correlation_list)
+cor_df2 <- do.call(rbind, p_value_list)
+merged_df <- merge(cor_df, cor_df2, by = "Column")
+
+# Order data frame by correlation in descending order
+merged_df <- merged_df[order(-merged_df$Correlation), ]
+
+# Print the ordered data frame
+print(merged_df)
+
+
+for (i in seq_along(merged_df$Column)){
+  x <- unlist(strsplit(merged_df$Column[i],split ="_"))
+  merged_df[i,4] <- x[1]
+  merged_df[i,5] <- x[2]
+  merged_df[i,6] <- x[3]
+}
+
+colnames(merged_df) <- c("full", "Correlation", "pvalue", "mz", "RT", "ID")
+
+correlationAnnotations <- merge(merged_df, annotations, by = "ID" )
+correlationAnnotationsAndFamilies <- left_join(correlationAnnotations, molecularFamilies, by = "FamilyCluster" )
+correlationAnnotationsAndFamilies <- correlationAnnotationsAndFamilies[complete.cases(correlationAnnotationsAndFamilies$Correlation), ]
+
+# Order data frame by correlation in descending order
+correlationAnnotationsAndFamilies <- correlationAnnotationsAndFamilies[order(-correlationAnnotationsAndFamilies$Correlation), ]
+
+#adjust p-value
+correlationAnnotationsAndFamilies$p_adjusted <- p.adjust(correlationAnnotationsAndFamilies$pvalue, method = "fdr")
+
+D5pval05 <- correlationAnnotationsAndFamilies[correlationAnnotationsAndFamilies$p_adjusted < 0.05,]
+
+#write.csv(D5pval05, file = "allCorrelationsD5.csv")
+
+```
+
+#________________________________________________________________________________
+
+                           Viral load vs Pseudo-F
+
+#________________________________________________________________________________
+
+```{r}
+ViralFCOVID <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/ViralLoadsAndCorrelations/ViralLoadvsPseudoF/Cohort2ViralLoadAndPseudoF.csv")
+
+
+```
+
+```{r}
+
+corrAll <- cor.test(ViralFCOVID$ViralLoad, ViralFCOVID$PseudoF, method = 'spearman')
+corrAll$estimate
+corrAll$p.value
+corrD51000 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$PseudoF, method = "spearman")
+corrD51000$estimate
+corrD51000$p.value
+corrD55000 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$PseudoF, method = "spearman")
+corrD55000$estimate
+corrD55000$p.value
+corrD20 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$PseudoF, method = "spearman")
+corrD20$estimate
+corrD20$p.value
+corrD5combined <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$PseudoF, method = "spearman")
+corrD5combined$estimate
+corrD5combined$p.value
+
+
+#___________________________________________________
+#           Try with natural log transform         -
+#___________________________________________________
+
+corrAll <- cor.test(log(ViralFCOVID$ViralLoad), ViralFCOVID$PseudoF, method = 'spearman')
+corrAll$estimate
+corrAll$p.value
+corrD51000 <- cor.test(log(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad), ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$PseudoF, method = "spearman")
+corrD51000$estimate
+corrD51000$p.value
+corrD55000 <- cor.test(log(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$ViralLoad), ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$PseudoF, method = "spearman")
+corrD55000$estimate
+corrD55000$p.value
+corrD20 <- cor.test(log(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$ViralLoad), ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$PseudoF, method = "spearman")
+corrD20$estimate
+corrD20$p.value
+corrD5combined <- cor.test(log(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad), ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$PseudoF, method = "spearman")
+corrD5combined$estimate
+corrD5combined$p.value
+
+corr <- cor.test(ViralFCOVID$ViralLoad, ViralFCOVID$PseudoF,)
+# Create a scatterplot with a trendline and R-squared value
+ggplot(ViralFCOVID, aes(x = ViralLoad, y = PseudoF)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Scatterplot of ViralLoad vs PseudoF",
+       x = "ViralLoad",
+       y = "Pseudo-F") +
+  theme_minimal()
+
+# Calculate the R-squared value and slope
+model <- lm(PseudoF ~ ViralLoad, data = ViralFCOVID)
+rsq <- round(summary(model)$r.squared, 3)
+slope <- round(coef(model)[2], 5)
+
+# Print the R-squared value and slope
+cat(paste("R-squared value:", rsq, "\n"))
+cat(paste("Slope:", slope, "\n"))
+
+
+ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]["ViralLoad"]
+
+
+#___________________________________________________
+#                   Distances                      -
+#___________________________________________________
+
+corrAll <- cor.test(ViralFCOVID$ViralLoad, ViralFCOVID$MedianDistance, method = 'spearman')
+corrAll$estimate
+corrAll$p.value
+corrD51000 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$MedianDistance, method = "spearman")
+corrD51000$estimate
+corrD51000$p.value
+corrD55000 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand",]$MedianDistance, method = "spearman")
+corrD55000$estimate
+corrD55000$p.value
+corrD20 <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_20D_OneThousand",]$MedianDistance, method = "spearman")
+corrD20$estimate
+corrD20$p.value
+corrD5combined <- cor.test(ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$ViralLoad, ViralFCOVID[ViralFCOVID["State"] =="Cohort2_Infected_D5_FiveThousand"|ViralFCOVID["State"] =="Cohort2_Infected_D5_OneThousand",]$MedianDistance, method = "spearman")
+corrD5combined$estimate
+corrD5combined$p.value
+```
+
+#________________________________________________________________________________
+
+                       Pseudo-F Correlatiton
+
+#________________________________________________________________________________
+
+```{r}
+PseudoF <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/6d_NoOutliers_PseudoF_ONLY_COHORT2_OnlySamples.csv")
+annotations <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/COVIDCohort2FMNInteriorExterior/FBMN2/ShortenedNodesNoSuspect.csv")
+PseudoF_D5 <- PseudoF[PseudoF$ATTRIBUTE_State == 'Infected_D5',]
+PseudoF_D20 <- PseudoF[PseudoF$ATTRIBUTE_State == 'Infected_20D',]
+molecularFamilies <- read.csv("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/MolecularFamiliesCSV.csv", fileEncoding = 'UTF-8-BOM')
+
+setwd("C:/Users/NewJarrod/OneDrive - University of Oklahoma/Iowa_COVID_Project/Iowa_Cohort2/ViralLoadsAndCorrelations/")
+
+# Initialize an empty list to store correlations
+correlation_list <- list()
+p_value_list <- list()
+
+# Loop through columns and calculate correlations
+suppressWarnings({ 
+  for (i in 27:4635) {
+    corr <- cor.test(PseudoF_D5$ATTRIBUTE_Pseudo_F, PseudoF_D5[, i], method = "spearman")
+    correlation_list <- c(correlation_list, list(data.frame(Column = names(PseudoF_D5)[i], Correlation = corr$estimate)))
+    p_value_list <- c(p_value_list, list(data.frame(Column = names(PseudoF_D5)[i], pval = corr$p.value)))
+  }
+})
+
+# Combine the list of correlation data frames into one data frame
+cor_df <- do.call(rbind, correlation_list)
+cor_df2 <- do.call(rbind, p_value_list)
+merged_df <- merge(cor_df, cor_df2, by = "Column")
+
+# Order data frame by correlation in descending order
+merged_df <- merged_df[order(-merged_df$Correlation), ]
+
+# Print the ordered data frame
+print(merged_df)
+
+
+for (i in seq_along(merged_df$Column)){
+  x <- unlist(strsplit(merged_df$Column[i],split ="_"))
+  merged_df[i,4] <- x[1]
+  merged_df[i,5] <- x[2]
+  merged_df[i,6] <- x[3]
+}
+
+colnames(merged_df) <- c("full", "Correlation", "pvalue", "mz", "RT", "ID")
+
+correlationAnnotations <- merge(merged_df, annotations, by = "ID" )
+correlationAnnotationsAndFamilies <- left_join(correlationAnnotations, molecularFamilies, by = "FamilyCluster" )
+correlationAnnotationsAndFamilies <- correlationAnnotationsAndFamilies[complete.cases(correlationAnnotationsAndFamilies$Correlation), ]
+
+# Order data frame by correlation in descending order
+correlationAnnotationsAndFamilies <- correlationAnnotationsAndFamilies[order(-correlationAnnotationsAndFamilies$Correlation), ]
+
+#adjust p-value
+correlationAnnotationsAndFamilies$p_adjusted <- p.adjust(correlationAnnotationsAndFamilies$pvalue, method = "fdr")
+
+PseudoFD5pval05 <- correlationAnnotationsAndFamilies[correlationAnnotationsAndFamilies$p_adjusted < 0.05,]
+
+write.csv(PseudoFD5pval05, file = "allPseudoFCorrelationsD5.csv")
+
+```
+
+#________________________________________________________________________________
+
+                           Viral load Significance
+
+#________________________________________________________________________________
+
+```{r}
+
+ViralLoadsOnly <- ViralLoads[,c(1,16,22,26)]
+viralMock5 <- ViralLoadsOnly[ViralLoadsOnly$ATTRIBUTE_state_dosage_cohort == "Cohort2_Mock5_MOCK" ,]
+viralMock20 <- ViralLoadsOnly[ViralLoadsOnly$ATTRIBUTE_state_dosage_cohort == "Cohort2_Mock20_MOCK" ,]
+viralD1000 <- ViralLoadsOnly[ViralLoadsOnly$ATTRIBUTE_state_dosage_cohort == "Cohort2_Infected_D5_OneThousand" ,]
+viralD5000 <- ViralLoadsOnly[ViralLoadsOnly$ATTRIBUTE_state_dosage_cohort == "Cohort2_Infected_D5_FiveThousand" ,]
+viralD20 <- ViralLoadsOnly[ViralLoadsOnly$ATTRIBUTE_state_dosage_cohort == "Cohort2_Infected_20D_OneThousand" ,]
+
+# Add a new column based on position values
+viralMock5 <- viralMock5 %>%
+  mutate(Position_Type = ifelse(ATTRIBUTE_Position %in% c(2,3,4,7,8,9), "Central", "Peripheral")) %>%
+  filter(ATTRIBUTE_Position != 11 & ATTRIBUTE_Position != 12)
+
+viralMock20 <- viralMock20 %>%
+  mutate(Position_Type = ifelse(ATTRIBUTE_Position %in% c(2,3,4,7,8,9), "Central", "Peripheral")) %>%
+  filter(ATTRIBUTE_Position != 11 & ATTRIBUTE_Position != 12)
+
+viralD1000 <- viralD1000 %>%
+  mutate(Position_Type = ifelse(ATTRIBUTE_Position %in% c(2,3,4,7,8,9), "Central", "Peripheral")) %>%
+  filter(ATTRIBUTE_Position != 11 & ATTRIBUTE_Position != 12)
+
+viralD5000 <- viralD5000 %>%
+  mutate(Position_Type = ifelse(ATTRIBUTE_Position %in% c(2,3,4,7,8,9), "Central", "Peripheral")) %>%
+  filter(ATTRIBUTE_Position != 11 & ATTRIBUTE_Position != 12)
+
+viralD20 <- viralD20 %>%
+  mutate(Position_Type = ifelse(ATTRIBUTE_Position %in% c(2,3,4,7,8,9), "Central", "Peripheral")) %>%
+  filter(ATTRIBUTE_Position != 11 & ATTRIBUTE_Position != 12)
+
+shapiro.test(viralMock5[viralMock5$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load) #normal
+shapiro.test(viralMock5[viralMock5$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralMock20[viralMock20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load) #normal
+shapiro.test(viralMock20[viralMock20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD20[viralD20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD20[viralD20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load) #Not normal
+
+wilcox.test(viralMock5[viralMock5$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load, viralMock5[viralMock5$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+wilcox.test(viralMock20[viralMock20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load, viralMock20[viralMock20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+#0.1942
+wilcox.test(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load, viralD1000[viralD1000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+#0.1421
+wilcox.test(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load, viralD5000[viralD5000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+#0.151
+wilcox.test(viralD20[viralD20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load, viralD20[viralD20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+wilcox.test(viralD1000$ATTRIBUTE_Viral_Load, viralMock5$ATTRIBUTE_Viral_Load)
+wilcox.test(viralD5000$ATTRIBUTE_Viral_Load, viralMock5$ATTRIBUTE_Viral_Load)
+wilcox.test(viralD20$ATTRIBUTE_Viral_Load, viralMock20$ATTRIBUTE_Viral_Load)
+median(viralD1000$ATTRIBUTE_Viral_Load)
+median(viralD5000$ATTRIBUTE_Viral_Load)
+median(viralD20$ATTRIBUTE_Viral_Load)
+shapiro.test(viralD1000$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD5000$ATTRIBUTE_Viral_Load) #Not normal
+shapiro.test(viralD20$ATTRIBUTE_Viral_Load) #Not normal
+wilcox.test(viralD5000$ATTRIBUTE_Viral_Load, viralD1000$ATTRIBUTE_Viral_Load)
+wilcox.test(viralD20$ATTRIBUTE_Viral_Load, viralD1000$ATTRIBUTE_Viral_Load)
+wilcox.test(viralD5000$ATTRIBUTE_Viral_Load, viralD20$ATTRIBUTE_Viral_Load)
+
+median(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+median(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+mean(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+mean(viralD1000[viralD1000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+median(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+median(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+mean(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+mean(viralD5000[viralD5000$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+median(viralD20[viralD20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+median(viralD20[viralD20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+mean(viralD20[viralD20$ATTRIBUTE_Position %in% c(1,5,6,10),]$ATTRIBUTE_Viral_Load)
+mean(viralD20[viralD20$ATTRIBUTE_Position %in% c(2,3,4,7,8,9),]$ATTRIBUTE_Viral_Load)
+
+
+# Perform the Kruskal-Wallis test
+kruskal.test(ATTRIBUTE_Viral_Load ~ Position_Type, data = viralMock5)
+kruskal.test(ATTRIBUTE_Viral_Load ~ Position_Type, data = viralMock20)
+kruskal.test(ATTRIBUTE_Viral_Load ~ Position_Type, data = viralD1000)
+kruskal.test(ATTRIBUTE_Viral_Load ~ Position_Type, data = viralD5000)
+kruskal.test(ATTRIBUTE_Viral_Load ~ Position_Type, data = viralD20)
+
+```
+```{r}
+#Pseudo-F
+# 0.2571
+wilcox.test(c(12.87874, 22.46072, 8.904733, 10.91874), c(10.36134, 11.91699, 5.297552, 12.09997, 9.948068, 8.327394))
+
+# 0.1775
+wilcox.test(c(19.99133, 36,89948, 22.46339, 13.97498), c(18.95851, 24.93229, 6.293912, 17.81124, 16.98055, 17.84118))
+
+#0.06667
+wilcox.test(c(11.58302, 14.61029, 13.48302, 9.083933), c(13.91599, 7.870275, 8.12082, 5.864108, 7.899302, 7.745196 ))
+
+
+
+#Distance
+?shapiro.test
+shapiro.test(c(0.492648, 0.482333, 0.516987, 0.477426)) #normal
+shapiro.test(c(0.440572, 0.438301, 0.432098, 0.465779, 0.344922, 0.389848)) #normal
+# 0.007482
+t.test(c(0.492648, 0.482333, 0.516987, 0.477426), c(0.440572, 0.438301, 0.432098, 0.465779, 0.344922, 0.389848))
+
+shapiro.test(c(0.565714, 0.597604, 0.614262, 0.530457)) #normal
+shapiro.test(c(0.562751, 0.54748, 0.453121, 0.547337, 0.472745, 0.469154)) #normal
+# 0.03716
+t.test(c(0.565714, 0.597604, 0.614262, 0.530457), c(0.562751, 0.54748, 0.453121, 0.547337, 0.472745, 0.469154))
+
+shapiro.test(c(0.475623, 0.41432, 0.572042, 0.38288)) #normal
+shapiro.test(c(0.481694, 0.400045, 0.389151, 0.407568, 0.361756, 0.332701)) #normal
+#0.2227
+t.test(c(0.475623, 0.41432, 0.572042, 0.38288), c(0.481694, 0.400045, 0.389151, 0.407568, 0.361756, 0.332701))
+
+
+
+```
